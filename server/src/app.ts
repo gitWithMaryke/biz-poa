@@ -1,6 +1,8 @@
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
+import path from 'path';
+import fs from 'fs';
 
 import productsRouter from './routes/products.js';
 import salesRouter from './routes/sales.js';
@@ -40,6 +42,30 @@ export function createApp(): Express {
   app.use('/api/mpesa', mpesaRouter);
   app.use('/api/reports', reportsRouter);
   app.use('/api/settings', settingsRouter);
+
+  // Serve compiled client UI if available, or a landing JSON page
+  const clientDist = path.resolve(process.cwd(), '../client/dist');
+  if (fs.existsSync(clientDist)) {
+    app.use(express.static(clientDist));
+    app.get('*', (req: Request, res: Response, next: any) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.join(clientDist, 'index.html'));
+    });
+  } else {
+    app.get('/', (req: Request, res: Response) => {
+      res.json({
+        service: 'Bizpoa POS Backend API',
+        status: 'online',
+        frontendDevUrl: 'http://localhost:3000',
+        endpoints: {
+          health: '/api/health',
+          products: '/api/products',
+          sales: '/api/sales',
+          ussd: '/api/ussd'
+        }
+      });
+    });
+  }
 
   return app;
 }
