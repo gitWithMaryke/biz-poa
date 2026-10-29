@@ -1,4 +1,4 @@
-import { Product, Sale, ShopSettings } from '../types/index.js';
+import { Product, Sale, ShopSettings, OutboxItem } from '../types/index.js';
 
 const API_BASE = '/api';
 
@@ -6,6 +6,62 @@ export const api = {
   async getProducts(): Promise<Product[]> {
     const res = await fetch(`${API_BASE}/products`);
     if (!res.ok) throw new Error('Failed to fetch products');
+    const json = await res.json();
+    return json.data;
+  },
+
+  async getArchivedProducts(): Promise<Product[]> {
+    const res = await fetch(`${API_BASE}/products/archived`);
+    if (!res.ok) throw new Error('Failed to fetch archived products');
+    const json = await res.json();
+    return json.data;
+  },
+
+  async saveProduct(productData: any): Promise<Product> {
+    const res = await fetch(`${API_BASE}/products`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(productData)
+    });
+    if (!res.ok) throw new Error('Failed to save product');
+    const json = await res.json();
+    return json.data;
+  },
+
+  async adjustStock(id: string, delta: number): Promise<Product> {
+    const res = await fetch(`${API_BASE}/products/${id}/adjust`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delta })
+    });
+    if (!res.ok) throw new Error('Failed to adjust stock');
+    const json = await res.json();
+    return json.data;
+  },
+
+  async restoreProduct(id: string, qty: number): Promise<Product> {
+    const res = await fetch(`${API_BASE}/products/${id}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ qty })
+    });
+    if (!res.ok) throw new Error('Failed to restore product');
+    const json = await res.json();
+    return json.data;
+  },
+
+  async deleteProduct(id: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/products/${id}`, {
+      method: 'DELETE'
+    });
+    if (!res.ok) throw new Error('Failed to delete product');
+    const json = await res.json();
+    return json.success;
+  },
+
+  async getSales(limit: number = 100): Promise<Sale[]> {
+    const res = await fetch(`${API_BASE}/sales?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch sales');
     const json = await res.json();
     return json.data;
   },
@@ -35,6 +91,13 @@ export const api = {
     const res = await fetch(`${API_BASE}/sync/pull`);
     if (!res.ok) throw new Error('Sync pull failed');
     return await res.json();
+  },
+
+  async getOutbox(): Promise<OutboxItem[]> {
+    const res = await fetch(`${API_BASE}/sms/outbox`);
+    if (!res.ok) throw new Error('Failed to fetch outbox');
+    const json = await res.json();
+    return json.data;
   },
 
   async sendSMS(to: string, message: string) {
@@ -93,5 +156,15 @@ export const api = {
     });
     if (!res.ok) throw new Error('Failed to trigger STK Push');
     return await res.json();
+  },
+
+  async callUSSD(payload: { sessionId: string; serviceCode: string; phoneNumber: string; text: string }): Promise<string> {
+    const res = await fetch(`${API_BASE}/ussd`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error('USSD request failed');
+    return await res.text();
   }
 };

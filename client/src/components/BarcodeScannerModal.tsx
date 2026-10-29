@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Camera, Barcode, ArrowRight, Check, AlertCircle } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Camera, Barcode, Check, AlertCircle, RefreshCw } from 'lucide-react';
 import { Modal } from './Modal.js';
 import { Product } from '../types/index.js';
 import { playBeep } from '../services/audioService.js';
@@ -22,36 +22,27 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [manualCode, setManualCode] = useState<string>('');
   const [scanHistory, setScanHistory] = useState<Array<{ text: string; success: boolean; time: string }>>([]);
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraError, setCameraError] = useState<string>('');
 
-  // Stop camera when modal closes
-  useEffect(() => {
-    if (!isOpen && streamRef.current) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+
+  const stopCamera = useCallback(() => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
-      setIsCameraActive(false);
     }
-  }, [isOpen]);
+    setIsCameraActive(false);
+  }, []);
 
-  const startCamera = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' }
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-      setIsCameraActive(true);
-    } catch (err) {
-      alert('Camera access denied or unavailable. You can use manual entry or demo barcodes.');
-    }
-  };
-
-  const handleBarcodeSubmit = (codeToUse?: string) => {
-    const raw = codeToUse || manualCode;
-    const trimmed = raw.trim();
+  const handleBarcodeDetected = useCallback((barcode: string) => {
+    const trimmed = barcode.trim();
     if (!trimmed) return;
 
     const matchedProduct = products.find((p) => p.barcode === trimmed);
@@ -79,9 +70,57 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       setScanHistory((prev) => [{ text: `Restocked ${name} +${receiveQty}`, success: true, time: now }, ...prev.slice(0, 3)]);
       onScanResult(trimmed, 'receive', receiveQty);
     }
+  }, [mode, receiveQty, products, onScanResult]);
 
-    setManualCode('');
+  // Continuous Camera Scan Loop
+  const scanFrame = useCallback(() => {
+    if (!videoRef.current || videoRef.current.readyState < 2) {
+      animationFrameRef.current = requestAnimationFrame(scanFrame);
+      return;
+    }
+
+    // Try native BarcodeDetector API if supported
+    if ('BarcodeDetector' in window) {
+      const barcodeDetector = new (window as any).BarcodeDetector({
+        formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39']
+      });
+
+      barcodeDetector.detect(videoRef.current)
+        .then((barcodes: any[]) => {
+          if (barcodes.length > 0) {
+            handleBarcodeDetected(barcodes[0].rawValue);
+          }
+        })
+        .catch(() => {});
+    }
+
+    animationFrameRef.current = requestAnimationFrame(scanFrame);
+  }, [handleBarcodeDetected]);
+
+  const startCamera = async () => {
+    setCameraError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(() => {});
+      }
+      setIsCameraActive(true);
+      animationFrameRef.current = requestAnimationFrame(scanFrame);
+    } catch (err: any) {
+      setCameraError('Camera unavailable or permission denied. Use manual entry or click demo barcodes below.');
+      setIsCameraActive(false);
+    }
   };
+
+  useEffect(() => {
+    if (!isOpen) {
+      stopCamera();
+    }
+  }, [isOpen, stopCamera]);
 
   const demoItems = products.filter((p) => p.barcode).slice(0, 3);
 
@@ -109,19 +148,30 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         </div>
 
         {/* Viewfinder Window */}
-        <div className="relative h-40 bg-[#1B1F1D] rounded-2xl overflow-hidden flex flex-col items-center justify-center border border-gray-700 shadow-inner">
-          {isCameraActive ? (
-            <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-          ) : (
-            <div className="flex flex-col items-center gap-2 text-gray-300">
+        <div className="relative h-44 bg-[#1B1F1D] rounded-2xl overflow-hidden flex flex-col items-center justify-center border border-gray-700 shadow-inner">
+          <video
+            ref={videoRef}
+            playsInline
+            muted
+            className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`}
+          />
+          <canvas ref={canvasRef} className="hidden" />
+
+          {!isCameraActive && (
+            <div className="flex flex-col items-center gap-2 text-gray-300 p-4 text-center">
               <button
+                type="button"
                 onClick={startCamera}
                 className="flex items-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-full text-xs font-semibold border border-white/30 backdrop-blur-xs transition-colors"
               >
                 <Camera className="w-4 h-4" />
-                <span>Open Device Camera</span>
+                <span>Activate Camera Scanner</span>
               </button>
-              <span className="text-[11px] text-gray-400">USB or Bluetooth scanner works automatically</span>
+              {cameraError ? (
+                <span className="text-[11px] text-amber-300">{cameraError}</span>
+              ) : (
+                <span className="text-[11px] text-gray-400">USB / Bluetooth handheld laser scanners work automatically</span>
+              )}
             </div>
           )}
 
@@ -166,13 +216,19 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               value={manualCode}
               onChange={(e) => setManualCode(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') handleBarcodeSubmit();
+                if (e.key === 'Enter') {
+                  handleBarcodeDetected(manualCode);
+                  setManualCode('');
+                }
               }}
               className="w-full pl-9 pr-3 py-2 bg-[#EEF1EE] border border-gray-200 rounded-xl font-mono text-sm text-gray-900 focus:outline-emerald-600"
             />
           </div>
           <button
-            onClick={() => handleBarcodeSubmit()}
+            onClick={() => {
+              handleBarcodeDetected(manualCode);
+              setManualCode('');
+            }}
             className="px-4 py-2 bg-[#0F7B5A] hover:bg-[#0c664a] text-white font-bold text-xs rounded-xl flex items-center justify-center transition-colors"
           >
             <span>Scan</span>
@@ -188,7 +244,7 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
             {demoItems.map((item) => (
               <button
                 key={item.id}
-                onClick={() => handleBarcodeSubmit(item.barcode)}
+                onClick={() => handleBarcodeDetected(item.barcode)}
                 className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-800 text-xs font-medium rounded-full border border-gray-200 flex items-center gap-1 transition-colors"
               >
                 <span>{item.name.split(' ').slice(0, 2).join(' ')}</span>
@@ -196,10 +252,16 @@ export const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               </button>
             ))}
             <button
-              onClick={() => handleBarcodeSubmit('616000100099')}
+              onClick={() => handleBarcodeDetected('616000100099')}
               className="px-2.5 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-medium rounded-full border border-amber-200 transition-colors"
             >
               Kimbo (Sold Out demo)
+            </button>
+            <button
+              onClick={() => handleBarcodeDetected('6009700123456')}
+              className="px-2.5 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 text-xs font-medium rounded-full border border-sky-200 transition-colors"
+            >
+              + New Barcode
             </button>
           </div>
         </div>

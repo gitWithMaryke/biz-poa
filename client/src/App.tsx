@@ -53,19 +53,47 @@ export const App: React.FC = () => {
     setTimeout(() => setToastVisible(false), 2800);
   }, []);
 
-  // Reload data from IndexedDB
+  // Reload data from Live Backend API with IndexedDB local caching
   const reloadData = useCallback(async () => {
-    await localDB.seedInitialDataIfNeeded();
-    const loadedProducts = await localDB.products.toArray();
-    const loadedSales = await localDB.sales.toArray();
-    const loadedOutbox = await localDB.outbox.toArray();
-    const loadedSettings = await localDB.settings.get('main');
+    try {
+      // 1. Fetch live products from backend
+      const [liveProducts, liveArchived, liveSales, liveSettings, liveOutbox] = await Promise.all([
+        api.getProducts().catch(() => null),
+        api.getArchivedProducts().catch(() => null),
+        api.getSales(100).catch(() => null),
+        api.getSettings().catch(() => null),
+        api.getOutbox().catch(() => null),
+      ]);
 
-    setProducts(loadedProducts);
-    setSales(loadedSales.sort((a, b) => b.timestamp - a.timestamp));
-    setOutbox(loadedOutbox.sort((a, b) => b.timestamp - a.timestamp));
-    if (loadedSettings) {
-      setSettings(loadedSettings);
+      if (liveProducts && liveSales) {
+        // Connected to backend server
+        const allProds = [...liveProducts, ...(liveArchived || [])];
+        setProducts(allProds);
+        setSales(liveSales.sort((a, b) => b.timestamp - a.timestamp));
+        if (liveSettings) setSettings(liveSettings);
+        if (liveOutbox) setOutbox(liveOutbox.sort((a, b) => b.timestamp - a.timestamp));
+
+        // Mirror to local IndexedDB for offline resilience
+        await localDB.products.clear();
+        await localDB.products.bulkPut(allProds);
+        await localDB.sales.clear();
+        await localDB.sales.bulkPut(liveSales);
+        if (liveSettings) await localDB.settings.put({ id: 'main', ...liveSettings });
+      } else {
+        throw new Error('Using offline cache');
+      }
+    } catch (e) {
+      // Offline fallback: load from IndexedDB
+      await localDB.seedInitialDataIfNeeded();
+      const loadedProducts = await localDB.products.toArray();
+      const loadedSales = await localDB.sales.toArray();
+      const loadedOutbox = await localDB.outbox.toArray();
+      const loadedSettings = await localDB.settings.get('main');
+
+      setProducts(loadedProducts);
+      setSales(loadedSales.sort((a, b) => b.timestamp - a.timestamp));
+      setOutbox(loadedOutbox.sort((a, b) => b.timestamp - a.timestamp));
+      if (loadedSettings) setSettings(loadedSettings);
     }
 
     const count = await getPendingSyncCount();
@@ -74,6 +102,9 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     reloadData();
+    // Live background polling every 5 seconds to keep registers in sync
+    const interval = setInterval(reloadData, 5000);
+    return () => clearInterval(interval);
   }, [reloadData]);
 
   // Handle Online / Offline network events
@@ -108,7 +139,7 @@ export const App: React.FC = () => {
     const nextState = !isOnline;
     setIsOnline(nextState);
     if (nextState) {
-      showToast('Switched to Online mode. Syncing...');
+      showToast('Switched to Online mode. Syncing with server...');
       triggerSync(true);
     } else {
       showToast('Switched to Offline mode. Sales work 100% offline.');
@@ -123,7 +154,7 @@ export const App: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeTag = (document.activeElement?.tagName || '').toLowerCase();
       if (activeTag === 'input' || activeTag === 'textarea' || activeTag === 'select') {
-        return; // Normal typing inside input fields
+        return;
       }
 
       const now = Date.now();
@@ -206,7 +237,7 @@ export const App: React.FC = () => {
     setIsCartOpen(false);
   };
 
-  // Complete Sale
+  // Complete Sale with Live Server Recording
   const handleCompleteSale = async (data: {
     method: 'cash' | 'mpesa' | 'card';
     tendered: number;
@@ -218,114 +249,116 @@ export const App: React.FC = () => {
     const now = Date.now();
     const newSeq = sales.length + 43;
 
-    const newSale: Sale = {
-      id: `sale_${now}`,
-      receiptNo: newSeq,
-      timestamp: now,
+    const salePayload = {
       lines: [...cart],
       total,
       method: data.method,
       tendered: data.tendered,
       change: data.change,
       phone: data.phone,
-      smsId: null,
-      synced: isOnline,
+      sendReceiptSMS: data.sendReceiptSMS,
     };
 
-    // Deduct stock in IndexedDB
-    for (const item of cart) {
-      const prod = await localDB.products.get(item.id);
-      if (prod) {
-        const updatedQty = Math.max(0, prod.qty - item.qty);
-        await localDB.products.update(prod.id, {
-          qty: updatedQty,
-          isArchived: updatedQty === 0,
-        });
-      }
-    }
+    let recordedSale: Sale;
 
-    // Queue digital receipt SMS if requested
-    if (data.sendReceiptSMS && data.phone) {
-      const smsLines = cart.map((l) => `${l.qty}x ${l.name} KES ${l.qty * l.price}`).join('\n');
-      const smsText = `${settings.shop}\nReceipt #${String(newSeq).padStart(4, '0')}\n${smsLines}\nTotal: KES ${total.toLocaleString()}\nAsante sana, Karibu tena!`;
-
-      const msgId = `msg_${now}`;
-      await localDB.outbox.add({
-        id: msgId,
-        to: data.phone,
-        text: smsText,
-        status: isOnline ? 'sent' : 'queued',
-        timestamp: now,
-      });
-      newSale.smsId = msgId;
-
+    try {
       if (isOnline) {
-        api.sendSMS(data.phone, smsText).catch(console.error);
+        // Direct live recording on server API
+        recordedSale = await api.createSale(salePayload);
+      } else {
+        throw new Error('Offline');
       }
-    }
-
-    await localDB.sales.add(newSale);
-    if (isOnline) {
-      api.createSale(newSale).catch(console.error);
+    } catch (e) {
+      // Offline fallback
+      recordedSale = {
+        id: `sale_${now}`,
+        receiptNo: newSeq,
+        timestamp: now,
+        lines: [...cart],
+        total,
+        method: data.method,
+        tendered: data.tendered,
+        change: data.change,
+        phone: data.phone,
+        smsId: null,
+        synced: false,
+      };
+      await localDB.sales.add(recordedSale);
     }
 
     playCashChime();
     setCart([]);
     setIsCheckoutOpen(false);
     setIsCartOpen(false);
-    setActiveReceiptSale(newSale);
+    setActiveReceiptSale(recordedSale);
     setIsReceiptOpen(true);
 
-    showToast(`Sale #${newSeq} completed successfully!`);
+    showToast(`Sale #${recordedSale.receiptNo} completed successfully!`);
     await reloadData();
   };
 
-  // Stock operations
+  // Stock operations with Live Server Sync
   const handleAdjustStock = async (id: string, delta: number) => {
-    const prod = await localDB.products.get(id);
-    if (!prod) return;
-    const newQty = prod.qty + delta;
-    if (newQty <= 0) {
-      await localDB.products.update(id, { qty: 0, isArchived: true });
-      showToast(`${prod.name} reached zero and was archived.`);
-    } else {
-      await localDB.products.update(id, { qty: newQty, isArchived: false });
-      showToast(`Updated ${prod.name} (${newQty} in stock)`);
+    try {
+      if (isOnline) {
+        const updated = await api.adjustStock(id, delta);
+        showToast(`Stock updated: ${updated.name} (${updated.qty} left)`);
+      } else {
+        throw new Error('Offline');
+      }
+    } catch (e) {
+      const prod = await localDB.products.get(id);
+      if (!prod) return;
+      const newQty = Math.max(0, prod.qty + delta);
+      await localDB.products.update(id, { qty: newQty, isArchived: newQty === 0 });
+      showToast(`Updated ${prod.name} (${newQty} in stock) [offline]`);
     }
     await reloadData();
   };
 
   const handleDeleteProduct = async (id: string) => {
-    await localDB.products.delete(id);
-    showToast('Product removed from catalog.');
+    try {
+      if (isOnline) {
+        await api.deleteProduct(id);
+      } else {
+        await localDB.products.delete(id);
+      }
+      showToast('Product removed from catalog.');
+    } catch (e) {
+      showToast('Error deleting product');
+    }
     await reloadData();
   };
 
   const handleRestoreProduct = async (id: string, qty: number) => {
-    await localDB.products.update(id, { qty, isArchived: false });
-    showToast('Product restored to stock!');
+    try {
+      if (isOnline) {
+        await api.restoreProduct(id, qty);
+      } else {
+        await localDB.products.update(id, { qty, isArchived: false });
+      }
+      showToast('Product restored to active stock!');
+    } catch (e) {
+      showToast('Error restoring product');
+    }
     await reloadData();
   };
 
   const handleSaveProduct = async (productData: any) => {
-    const now = Date.now();
-    if (productData.id) {
-      await localDB.products.update(productData.id, {
-        ...productData,
-        isArchived: false,
-        updatedAt: now,
-      });
-      showToast('Product updated.');
-    } else {
-      const newProd: Product = {
-        id: `prod_${now}`,
-        ...productData,
-        isArchived: false,
-        createdAt: now,
-        updatedAt: now,
-      };
-      await localDB.products.add(newProd);
-      showToast('New product added to catalog.');
+    try {
+      if (isOnline) {
+        await api.saveProduct(productData);
+      } else {
+        const now = Date.now();
+        if (productData.id) {
+          await localDB.products.update(productData.id, { ...productData, isArchived: false, updatedAt: now });
+        } else {
+          await localDB.products.add({ id: `prod_${now}`, ...productData, isArchived: false, createdAt: now });
+        }
+      }
+      showToast(productData.id ? 'Product updated.' : 'New product added to stock.');
+    } catch (e) {
+      showToast('Error saving product');
     }
     setIsProductFormOpen(false);
     setProductToEdit(null);
@@ -360,11 +393,18 @@ export const App: React.FC = () => {
   };
 
   const handleUpdateSettings = async (newSettings: Partial<ShopSettings>) => {
-    const updated = { ...settings, ...newSettings };
-    await localDB.settings.put({ id: 'main', ...updated });
-    setSettings(updated);
-    if (isOnline) {
-      api.updateSettings(newSettings).catch(console.error);
+    try {
+      if (isOnline) {
+        const updated = await api.updateSettings(newSettings);
+        setSettings(updated);
+      } else {
+        const updated = { ...settings, ...newSettings };
+        await localDB.settings.put({ id: 'main', ...updated });
+        setSettings(updated);
+      }
+      showToast('Settings saved successfully!');
+    } catch (e) {
+      showToast('Error saving settings');
     }
     await reloadData();
   };
@@ -381,7 +421,7 @@ export const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#DFE5E1] text-[#14201B] flex flex-col items-center">
-      {/* Shell Frame matching phone or desktop viewport */}
+      {/* Shell Frame */}
       <div className="w-full max-w-md min-h-screen bg-[#EEF1EE] flex flex-col relative shadow-2xl overflow-x-hidden">
         {/* App Header */}
         <Header
@@ -467,12 +507,13 @@ export const App: React.FC = () => {
           }}
         />
 
-        {/* Checkout Modal */}
+        {/* Checkout Modal with Interactive Safaricom M-Pesa STK Push */}
         <CheckoutModal
           isOpen={isCheckoutOpen}
           onClose={() => setIsCheckoutOpen(false)}
           total={cart.reduce((sum, item) => sum + item.price * item.qty, 0)}
           tillNumber={settings.till}
+          shopName={settings.shop}
           isOnline={isOnline}
           onCompleteSale={handleCompleteSale}
         />

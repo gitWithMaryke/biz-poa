@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Smartphone, Send, MessageSquare } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Smartphone, Send } from 'lucide-react';
 import { Modal } from './Modal.js';
 import { api } from '../services/api.js';
 
@@ -21,52 +21,67 @@ export const FeaturePhoneSimulator: React.FC<FeaturePhoneSimulatorProps> = ({
   todaySalesCount,
 }) => {
   const [phoneMode, setPhoneMode] = useState<'ussd' | 'sms'>('ussd');
-  const [ussdScreen, setUssdScreen] = useState<'menu' | 'today' | 'yesterday' | 'last5' | 'lowstock' | 'end'>('menu');
+  const [ussdHistory, setUssdHistory] = useState<string[]>([]);
+  const [ussdScreenText, setUssdScreenText] = useState<string>('');
   const [ussdInput, setUssdInput] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
   const [smsSending, setSmsSending] = useState<boolean>(false);
   const [smsStatus, setSmsStatus] = useState<string>('');
 
-  const getUSSDContent = (): string => {
-    switch (ussdScreen) {
-      case 'menu':
-        return `${shopName} POS\n1 Today's income\n2 Yesterday\n3 Last 5 sales\n4 Low stock\n5 Send SMS report\n0 Exit`;
-      case 'today':
-        return `Today's Income:\nKES ${todayIncome.toLocaleString()}\nReceipts: ${todaySalesCount}\n0 Back`;
-      case 'yesterday':
-        return `Yesterday's Income:\nKES 28,450\nReceipts: 34\n0 Back`;
-      case 'last5':
-        return `Last 5 Sales:\n#0042 11:30 KES 550 (MPESA)\n#0041 10:15 KES 200 (CASH)\n#0040 09:40 KES 1,240 (MPESA)\n0 Back`;
-      case 'lowstock':
-        return `Low Stock Items:\nPishori Rice: 3 left\nStoney Tangawizi: 2 left\n0 Back`;
-      case 'end':
-        return `Asante!\nSession ended.\nPress Send to dial again.`;
-      default:
-        return `Invalid choice.\n0 Back`;
+  // Call real backend USSD Webhook
+  const fetchUSSD = async (history: string[]) => {
+    setIsLoading(true);
+    try {
+      const textParam = history.join('*');
+      const response = await api.callUSSD({
+        sessionId: 'sim_sess_001',
+        serviceCode: '*384*5012#',
+        phoneNumber: ownerPhone || '+254722000111',
+        text: textParam
+      });
+
+      // Strip CON or END prefix for clean LCD rendering
+      const cleanText = response.replace(/^(CON|END)\s*/, '');
+      setUssdScreenText(cleanText);
+    } catch (e) {
+      // Fallback local response if server unreachable
+      if (!history.length) {
+        setUssdScreenText(`${shopName} POS\n1 Today's income\n2 Yesterday\n3 Last 5 sales\n4 Low stock\n5 Send SMS report\n0 Exit`);
+      } else {
+        const last = history[history.length - 1];
+        if (last === '1') setUssdScreenText(`Today's Sales:\nKES ${todayIncome.toLocaleString()} (${todaySalesCount} sales)\n0 Back`);
+        else if (last === '0') setUssdScreenText(`Session ended.\nPress Send to dial again.`);
+        else setUssdScreenText(`Option ${last} processed.\n0 Back`);
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (isOpen && phoneMode === 'ussd') {
+      setUssdHistory([]);
+      setUssdInput('');
+      fetchUSSD([]);
+    }
+  }, [isOpen, phoneMode]);
 
   const handleKeyPress = (key: string) => {
     if (key === 'Del') {
       setUssdInput((prev) => prev.slice(0, -1));
     } else if (key === 'Send') {
-      if (ussdScreen === 'end') {
-        setUssdScreen('menu');
+      if (ussdScreenText.includes('Session ended')) {
+        setUssdHistory([]);
         setUssdInput('');
+        fetchUSSD([]);
         return;
       }
-      if (ussdScreen === 'menu') {
-        if (ussdInput === '1') setUssdScreen('today');
-        else if (ussdInput === '2') setUssdScreen('yesterday');
-        else if (ussdInput === '3') setUssdScreen('last5');
-        else if (ussdInput === '4') setUssdScreen('lowstock');
-        else if (ussdInput === '5') {
-          handleSendSMSReport();
-          setUssdScreen('end');
-        } else if (ussdInput === '0') setUssdScreen('end');
+
+      if (ussdInput.trim() !== '') {
+        const newHist = [...ussdHistory, ussdInput.trim()];
+        setUssdHistory(newHist);
         setUssdInput('');
-      } else {
-        if (ussdInput === '0') setUssdScreen('menu');
-        setUssdInput('');
+        fetchUSSD(newHist);
       }
     } else {
       if (ussdInput.length < 3) {
@@ -121,7 +136,11 @@ export const FeaturePhoneSimulator: React.FC<FeaturePhoneSimulatorProps> = ({
             </div>
 
             <pre className="text-xs font-bold whitespace-pre-wrap leading-tight my-1 flex-1 font-mono">
-              {phoneMode === 'ussd' ? getUSSDContent() : (
+              {isLoading ? (
+                'Connecting to GSM network...'
+              ) : phoneMode === 'ussd' ? (
+                ussdScreenText
+              ) : (
                 `${shopName}\nToday's Sales Summary\nIncome: KES ${todayIncome.toLocaleString()}\nReceipts: ${todaySalesCount}\nLow Stock: Pishori (3)\nAsante!`
               )}
             </pre>
@@ -142,11 +161,12 @@ export const FeaturePhoneSimulator: React.FC<FeaturePhoneSimulatorProps> = ({
                 return (
                   <button
                     key={key}
+                    type="button"
                     onClick={() => handleKeyPress(key)}
                     className={`h-9 rounded-lg font-mono font-bold text-sm active:scale-95 transition-transform flex items-center justify-center ${
                       isSend
-                        ? 'bg-[#2f9e6f] hover:bg-[#28885f] text-white'
-                        : 'bg-[#3a413d] hover:bg-[#48524c] text-white'
+                        ? 'bg-[#2f9e6f] hover:bg-[#28885f] text-white shadow-xs'
+                        : 'bg-[#3a413d] hover:bg-[#48524c] text-white shadow-xs'
                     }`}
                   >
                     {key}
@@ -159,7 +179,7 @@ export const FeaturePhoneSimulator: React.FC<FeaturePhoneSimulatorProps> = ({
 
         <p className="text-xs text-gray-500 text-center px-4 leading-relaxed">
           {phoneMode === 'ussd'
-            ? 'This simulates what the shop owner sees when querying sales and stock on any basic GSM phone using USSD.'
+            ? 'Connected live to /api/ussd. Dial 1, 2, 3 or 4 then click Send to test live USSD session.'
             : 'The daily closing SMS sent automatically to the owner\'s phone at closing time without requiring internet.'}
         </p>
 
