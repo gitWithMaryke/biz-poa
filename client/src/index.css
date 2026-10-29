@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #EEF1EE;
+  --card: #FFFFFF;
+  --fg: #14201B;
+  --muted: #5C6962;
+  --line: #DAE1DC;
+  --accent: #0F7B5A;
+  --accent-soft: #DAEEE5;
+  --warn: #9A5A0A;
+  --warn-soft: #FAEACB;
+  --bad: #B0322A;
+  --bad-soft: #F7DCD8;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  color: var(--fg);
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Tabular figures for aligned pricing numbers */
+.num, .mono-n {
+  font-variant-numeric: tabular-nums;
+  font-family: 'IBM Plex Mono', monospace;
+}
+
+/* Custom Scrollbar for fast retail POS touchscreens */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+/* Thermal Receipt Print Styles */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #thermal-receipt, #thermal-receipt * {
+    visibility: visible;
+  }
+  #thermal-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm;
+    margin: 0;
+    padding: 4mm;
+    font-size: 11pt;
+    font-family: 'Courier New', Courier, monospace;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+}
