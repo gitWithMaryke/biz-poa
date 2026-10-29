@@ -30,7 +30,6 @@ server/data/
 # OS and Editor files
 .DS_Store
 Thumbs.db
-.vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
